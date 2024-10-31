@@ -21,6 +21,8 @@ import (
 	"github.com/buildkite/agent/v3/internal/awslib"
 	awssigner "github.com/buildkite/agent/v3/internal/cryptosigner/aws"
 	"github.com/buildkite/agent/v3/internal/experiments"
+	"github.com/buildkite/agent/v3/internal/job/executor"
+	"github.com/buildkite/agent/v3/internal/job/config"
 	"github.com/buildkite/agent/v3/internal/redact"
 	"github.com/buildkite/agent/v3/internal/replacer"
 	"github.com/buildkite/agent/v3/internal/stdin"
@@ -276,6 +278,40 @@ var PipelineUploadCommand = cli.Command{
 				return err
 			}
 			l.Warn("There were some issues with the pipeline input - pipeline upload will proceed, but might not succeed:\n%v", w)
+		}
+
+		// @JOSH
+		executor := New(ReadFromEnvironment(environ))
+		if executor.hasGlobalHook("pipeline-upload"){
+			// Dump the pipeline into a temppath (yaml)
+			tempFile, err := os.CreateTemp("", "pipeline-*.yml")
+			if err != nil {
+				return fmt.Errorf("failed to create temp file: %w", err)
+			}
+			defer os.Remove(tempFile.Name())
+
+			if err := yaml.NewEncoder(tempFile).Encode(result); err != nil {
+				return fmt.Errorf("failed to encode pipeline: %w", err)
+			}
+			executor.Env.Set("BUILDKITE_PIPELINE_UPLOAD_TMP_PATH", tempFile.Name())
+
+			if err := executor.ExecuteGlobalHook(ctx, "pipeline-upload"); err != nil {
+				return fmt.Errorf("failed to execute pipeline-upload hook: %w", err)
+			}
+
+			updatedPipelineFile, err := os.Open(tempFile.Name())
+			if err != nil {
+				return fmt.Errorf("failed to open updated pipeline file: %w", err)
+			}
+			defer updatedPipelineFile.Close()
+
+			updatedResult, err := pipeline.Parse(updatedPipelineFile)
+			if err != nil {
+				return fmt.Errorf("failed to parse updated pipeline: %w", err)
+			}
+
+			// Replace the original result with the updated one
+			result = updatedResult
 		}
 
 		if len(cfg.RedactedVars) > 0 {

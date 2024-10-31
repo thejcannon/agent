@@ -246,3 +246,75 @@ steps:
 		})
 	}
 }
+
+func TestPipelineUploadHook(t *testing.T) {
+	t.Parallel()
+
+	// Create the hook
+	tempHooksDir := t.TempDir()
+	hookContent := `#!/bin/bash
+set -euo pipefail
+
+# Read the pipeline from the temp file
+PIPELINE=$(cat "$BUILDKITE_PIPELINE_UPLOAD_TMP_PATH")
+
+# Modify the pipeline
+MODIFIED_PIPELINE=$(echo "$PIPELINE" | sed 's/Original step/Modified step/')
+
+# Write the modified pipeline back to the temp file
+echo "$MODIFIED_PIPELINE" > "$BUILDKITE_PIPELINE_UPLOAD_TMP_PATH"
+`
+	err := os.WriteFile(filepath.Join(tempHooksDir, "pipeline-upload"), []byte(hookContent), 0755)
+	assert.NilError(t, err)
+
+	environ := env.FromMap(map[string]string{
+		"BUILDKITE_HOOKS_PATH": tempHooksDir,
+	})
+
+	executor := executor.New(ExecutorConfig{
+		Hooks: executor.HooksConfig{
+			Path: tempHooksDir,
+		},
+	})
+
+	cfg := &PipelineUploadConfig{
+		RedactedVars:  []string{},
+		RejectSecrets: false,
+	}
+
+	const originalPipelineYAML = `---
+steps:
+- command: echo "Original step"
+`
+
+	ctx := context.Background()
+
+	// Write the original pipeline to the temp file
+	err = os.WriteFile(environ.Get("BUILDKITE_PIPELINE_UPLOAD_TMP_PATH"), []byte(originalPipelineYAML), 0644)
+	assert.NilError(t, err)
+
+	// Parse and interpolate the original pipeline
+	p, err := cfg.parseAndInterpolate(ctx, "test", strings.NewReader(originalPipelineYAML), environ)
+	assert.NilError(t, err)
+
+	// Check if the executor has the global hook
+	assert.Assert(t, executor.HasGlobalHook("pipeline-upload"))
+
+	// Execute the pipeline-upload hook
+	err = executor.ExecuteGlobalHook(ctx, "pipeline-upload")
+	assert.NilError(t, err)
+
+	// Read the modified pipeline
+	modifiedPipelineContent, err := os.ReadFile(environ.Get("BUILDKITE_PIPELINE_UPLOAD_TMP_PATH"))
+	assert.NilError(t, err)
+
+	// Parse the modified pipeline
+	modifiedPipeline, err := pipeline.Parse(bytes.NewReader(modifiedPipelineContent))
+	assert.NilError(t, err)
+
+	// Check if the pipeline was modified
+	assert.Equal(t, len(modifiedPipeline.Steps), 1)
+	commandStep, ok := modifiedPipeline.Steps[0].(*pipeline.CommandStep)
+	assert.Assert(t, ok)
+	assert.Equal(t, commandStep.Command, "echo \"Modified step\"")
+}
